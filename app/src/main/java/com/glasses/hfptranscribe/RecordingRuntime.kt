@@ -5,12 +5,15 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.SystemClock
+import android.util.Log
 import com.glasses.hfptranscribe.audio.AudioRouteController
 import com.glasses.hfptranscribe.audio.AudioRouteSelector
 import com.glasses.hfptranscribe.audio.CaptureSource
 import com.glasses.hfptranscribe.audio.DeviceScan
+import com.glasses.hfptranscribe.audio.InputKind
 import com.glasses.hfptranscribe.audio.pcm16Level
 import com.glasses.hfptranscribe.audio.pcm16ToFloat
+import com.glasses.hfptranscribe.audio.readWavPcm16Mono
 import com.glasses.hfptranscribe.session.OpenSession
 import com.glasses.hfptranscribe.session.SessionStore
 import com.glasses.hfptranscribe.stt.AsrModel
@@ -31,6 +34,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.math.min
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.coroutineContext
@@ -118,6 +122,37 @@ class RecordingRuntime(
         }
     }
 
+    /**
+     * Streams a WAV through the same recognizer and session files as the mic.
+     * Only the debug entry point calls this. It is not a control on the main screen.
+     */
+    fun transcribeFile(wav: File, model: AsrModel, onStatus: (String) -> Unit) {
+        if (job?.isActive == true) return
+        stopRequested = false
+        job = scope.launch {
+            try {
+                runFile(wav, model, onStatus)
+            } catch (error: Throwable) {
+                if (coroutineContext.isActive) {
+                    val message = error.message ?: "Could not transcribe that file"
+                    _state.update {
+                        it.copy(
+                            phase = RecordPhase.ERROR,
+                            error = message,
+                            statusText = message,
+                            level = 0f,
+                        )
+                    }
+                    onStatus(message)
+                    Log.e(TRANSCRIPT_LOG, message, error)
+                }
+            } finally {
+                routes.release()
+                activeRecord = null
+            }
+        }
+    }
+
     private suspend fun record(onStatus: (String) -> Unit) {
         val settings = prefs.snapshot()
         val model = settings.activeModel()
@@ -157,7 +192,7 @@ class RecordingRuntime(
         var capture: Capture? = null
         val lines = mutableListOf<TranscriptLine>()
         var failure: String? = null
-        val startedAt = SystemClock.elapsedRealtime()
+        var audioMs = 0L
         try {
             transcriber.start()
             capture = openCapture(source, routed.device)
@@ -238,6 +273,7 @@ class RecordingRuntime(
                 session.writePcm(buffer, read)
                 samples += read / 2
                 val elapsed = samples * 1000L / rate
+                audioMs = elapsed
                 val now = SystemClock.elapsedRealtime()
                 if (now - headerAt > 1_000L) {
                     session.updateHeader()
@@ -262,13 +298,11 @@ class RecordingRuntime(
                 }
             }
             val tail = transcriber.finish()
-            if (tail.finalText != null) {
-                val elapsed = samples * 1000L / rate
-                lines += TranscriptLine(elapsed, tail.finalText)
+            if (tail.finalText != null && lines.lastOrNull()?.text != tail.finalText) {
+                lines += TranscriptLine(audioMs, tail.finalText)
             }
             val rtf = transcriber.realTimeFactor()
-            val duration = SystemClock.elapsedRealtime() - startedAt
-            session.finish(duration, rtf, lines)
+            session.finish(audioMs, rtf, lines)
             session = null
             if (failure != null) {
                 _state.update {
@@ -280,7 +314,7 @@ class RecordingRuntime(
                         partial = "",
                         lines = lines.toList(),
                         rtf = rtf,
-                        elapsedMs = duration,
+                        elapsedMs = audioMs,
                     )
                 }
                 onStatus(failure)
@@ -293,7 +327,7 @@ class RecordingRuntime(
                         partial = "",
                         lines = lines.toList(),
                         rtf = rtf,
-                        elapsedMs = duration,
+                        elapsedMs = audioMs,
                         error = null,
                     )
                 }
@@ -304,8 +338,140 @@ class RecordingRuntime(
             activeRecord = null
             transcriber.release()
             if (session != null) {
-                val duration = SystemClock.elapsedRealtime() - startedAt
-                session.finish(duration, transcriber.realTimeFactor(), lines)
+                session.finish(audioMs, transcriber.realTimeFactor(), lines)
+            }
+        }
+    }
+
+    private suspend fun runFile(wav: File, model: AsrModel, onStatus: (String) -> Unit) {
+        val settings = prefs.snapshot()
+        _state.value = RecorderState(
+            phase = RecordPhase.PREPARING,
+            statusText = "Preparing ${model.title}",
+            modelLabel = model.title,
+            inputLabel = FILE_INPUT_LABEL,
+        )
+        onStatus("Preparing ${model.title}")
+        if (!models.isReady(model)) {
+            _state.update { it.copy(statusText = "Downloading ${model.title}") }
+            onStatus("Downloading ${model.title}")
+            models.ensure(model)
+        }
+        _state.update { it.copy(statusText = "Loading ${model.title}") }
+        onStatus("Loading ${model.title}")
+        val audio = withContext(Dispatchers.IO) { readWavPcm16Mono(wav) }
+        val transcriber = transcribers(
+            model,
+            models.directory(model),
+            if (model.passesLanguage) settings.language.code else null,
+        )
+        var session: OpenSession? = null
+        val lines = mutableListOf<TranscriptLine>()
+        var audioMs = 0L
+        try {
+            transcriber.start()
+            val rate = audio.sampleRate
+            session = sessions.create(
+                sampleRate = rate,
+                inputLabel = FILE_INPUT_LABEL,
+                source = "FILE",
+                modelId = model.id,
+                modelTitle = model.title,
+                language = settings.language.code,
+            )
+            _state.update {
+                it.copy(
+                    phase = RecordPhase.RECORDING,
+                    statusText = "Recording",
+                    inputLabel = FILE_INPUT_LABEL,
+                    sampleRate = rate,
+                    lines = emptyList(),
+                    partial = "",
+                    error = null,
+                    modelLabel = model.title,
+                )
+            }
+            onStatus("Recording · $FILE_INPUT_LABEL")
+            val pcm = audio.pcm
+            val chunkBytes = max(2, rate / 10 * 2)
+            var offset = 0
+            var samples = 0L
+            var headerAt = 0L
+            var smoothed = 0f
+            var lastPartial = ""
+            while (offset < pcm.size && !stopRequested) {
+                val count = min(chunkBytes, pcm.size - offset)
+                val even = count - (count % 2)
+                if (even <= 0) break
+                val slice = pcm.copyOfRange(offset, offset + even)
+                offset += even
+                val decodeStarted = System.nanoTime()
+                session.writePcm(slice, even)
+                samples += even / 2
+                val elapsed = samples * 1000L / rate
+                audioMs = elapsed
+                val now = SystemClock.elapsedRealtime()
+                if (now - headerAt > 1_000L) {
+                    session.updateHeader()
+                    headerAt = now
+                }
+                val instant = pcm16Level(slice, even)
+                smoothed = if (instant > smoothed) instant else smoothed * 0.85f
+                val update = transcriber.accept(pcm16ToFloat(slice, even), rate)
+                if (update.finalText != null) {
+                    lines += TranscriptLine(elapsed, update.finalText)
+                    session.writeTranscript(lines)
+                    lastPartial = ""
+                    Log.i(TRANSCRIPT_LOG, "final: ${update.finalText}")
+                } else if (update.partial.isNotBlank() && update.partial != lastPartial) {
+                    lastPartial = update.partial
+                    Log.i(TRANSCRIPT_LOG, "partial: ${update.partial}")
+                }
+                _state.update {
+                    it.copy(
+                        level = smoothed,
+                        partial = update.partial,
+                        lines = lines.toList(),
+                        elapsedMs = elapsed,
+                        rtf = transcriber.realTimeFactor(),
+                    )
+                }
+                val decodeMs = (System.nanoTime() - decodeStarted) / 1_000_000
+                val chunkMs = even / 2 * 1000L / rate
+                if (chunkMs > decodeMs) delay(chunkMs - decodeMs)
+            }
+            val tail = transcriber.finish()
+            if (tail.finalText != null && lines.lastOrNull()?.text != tail.finalText) {
+                lines += TranscriptLine(audioMs, tail.finalText)
+                Log.i(TRANSCRIPT_LOG, "final: ${tail.finalText}")
+            }
+            val rtf = transcriber.realTimeFactor()
+            session.finish(audioMs, rtf, lines)
+            session = null
+            Log.i(
+                TRANSCRIPT_LOG,
+                "saved lines=${lines.size} rtf=${rtf?.let { "%.3f".format(it) } ?: "n/a"} " +
+                    "text=${lines.joinToString(" | ") { it.text }}",
+            )
+            _state.update {
+                it.copy(
+                    phase = RecordPhase.IDLE,
+                    statusText = "Saved",
+                    level = 0f,
+                    partial = "",
+                    lines = lines.toList(),
+                    rtf = rtf,
+                    elapsedMs = audioMs,
+                    error = null,
+                    inputLabel = FILE_INPUT_LABEL,
+                    modelLabel = model.title,
+                )
+            }
+            onStatus("Saved")
+        } finally {
+            transcriber.release()
+            if (session != null) {
+                session.finish(audioMs, transcriber.realTimeFactor(), lines)
             }
         }
     }
@@ -336,11 +502,13 @@ class RecordingRuntime(
         return when (source) {
             CaptureSource.PHONE -> {
                 routes.applyPhoneMic()
-                val device = routes.device(deviceId)
+                val scan = routes.scan()
+                _scan.value = scan
+                val headset = scan.candidates.any { it.kind == InputKind.BLUETOOTH_SCO }
                 Routed(
                     deviceId = deviceId,
-                    device = device,
-                    label = AudioRouteSelector.phoneLabel(),
+                    device = routes.device(deviceId),
+                    label = AudioRouteSelector.phoneFallbackLabel(headset),
                 )
             }
             CaptureSource.GLASSES -> {
@@ -496,3 +664,6 @@ class RecordingRuntime(
 private fun OpenSession.writePcm(pcm: ByteArray, length: Int) {
     wav.write(pcm, length)
 }
+
+internal const val FILE_INPUT_LABEL = "Audio file"
+private const val TRANSCRIPT_LOG = "GlassesTranscript"

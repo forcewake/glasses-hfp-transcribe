@@ -53,7 +53,10 @@ fun HomeScaffold(viewModel: MainViewModel) {
                 Destination.entries.forEach { item ->
                     NavigationBarItem(
                         selected = destination == item,
-                        onClick = { destination = item },
+                        onClick = {
+                            destination = item
+                            viewModel.refresh()
+                        },
                         icon = {
                             Icon(
                                 imageVector = when (item) {
@@ -85,6 +88,6 @@ fun HomeScaffold(viewModel: MainViewModel) {
     }
 }
 
-internal fun MainViewModel.needsMicrophone(): Boolean = !microphoneGranted()
+internal fun MainViewModel.needsMicrophone(): Boolean = needsPermissions()
 
 internal const val MIC_PERMISSION = Manifest.permission.RECORD_AUDIO

@@ -67,6 +67,7 @@ fun RecordScreen(
     val banner by viewModel.banner.collectAsState()
     val recording = state.phase == RecordPhase.RECORDING || state.phase == RecordPhase.PREPARING
     val glasses = AudioRouteSelector.selectGlasses(scan.candidates, settings.glassesName)
+    val scoCount = scan.candidates.count { it.kind == InputKind.BLUETOOTH_SCO }
     val needsMic = viewModel.needsMicrophone()
 
     Column(
@@ -82,7 +83,9 @@ fun RecordScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         if (state.phase == RecordPhase.RECORDING) {
-            RecordingBanner(state.inputLabel)
+            RecordingBanner("Recording · ${state.inputLabel}")
+        } else if (state.phase == RecordPhase.PREPARING) {
+            RecordingBanner(state.statusText.ifBlank { "Preparing" })
         }
         SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
             SegmentedButton(
@@ -101,9 +104,9 @@ fun RecordScreen(
         InputStatus(
             usePhone = settings.usePhoneMic,
             glassesName = glasses?.productName,
-            scoCount = scan.candidates.count { it.kind == InputKind.BLUETOOTH_SCO },
+            scoCount = scoCount,
             permissionMissing = scan.bluetoothPermissionMissing,
-            activeLabel = if (recording) state.inputLabel else null,
+            activeLabel = state.inputLabel.takeIf { recording && it.isNotBlank() },
         )
         LevelMeter(if (state.phase == RecordPhase.RECORDING) state.level else 0f)
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -157,6 +160,12 @@ fun RecordScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        if (!recording && settings.usePhoneMic && scoCount == 0) {
+            Text(
+                "No glasses are connected, so this records the phone microphone.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         TranscriptPane(
             lines = state.lines.map { "[${formatTimestamp(it.offsetMillis)}] ${it.text}" },
             partial = state.partial,
@@ -195,7 +204,7 @@ private fun RecordingBanner(label: String) {
                 .background(Color.White.copy(alpha = alpha)),
         )
         Spacer(Modifier.width(10.dp))
-        Text("Recording · $label", color = Color.White, style = MaterialTheme.typography.titleMedium)
+        Text(label, color = Color.White, style = MaterialTheme.typography.titleMedium)
     }
 }
 
@@ -209,7 +218,7 @@ private fun InputStatus(
 ) {
     val phone = usePhone
     val text = activeLabel ?: if (phone) {
-        AudioRouteSelector.phoneLabel()
+        AudioRouteSelector.phoneFallbackLabel(headsetConnected = scoCount > 0)
     } else if (glassesName != null) {
         AudioRouteSelector.glassesLabel(glassesName)
     } else if (permissionMissing) {

@@ -1,5 +1,7 @@
 package com.glasses.hfptranscribe.ui
 
+import android.content.ActivityNotFoundException
+import android.content.ClipData
 import android.content.Intent
 import android.media.MediaPlayer
 import androidx.compose.foundation.layout.Arrangement
@@ -47,6 +49,7 @@ fun SessionsScreen(viewModel: MainViewModel, modifier: Modifier = Modifier) {
     var playingId by remember { mutableStateOf<String?>(null) }
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
     var pendingDelete by remember { mutableStateOf<SessionSummary?>(null) }
+    var actionError by remember { mutableStateOf<String?>(null) }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -61,50 +64,81 @@ fun SessionsScreen(viewModel: MainViewModel, modifier: Modifier = Modifier) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(bottom = 12.dp),
         )
+        actionError?.let { text ->
+            Text(text, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = 8.dp))
+        }
         if (sessions.isEmpty()) {
             Text("No recordings yet.")
             return@Column
         }
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
             items(sessions, key = { it.id }) { session ->
+                val transcript = remember(session.id, session.durationMs, session.transcript.length()) {
+                    session.transcript.takeIf { it.isFile }?.readText()?.trim().orEmpty()
+                }
                 SessionRow(
                     session = session,
+                    transcript = transcript,
                     playing = playingId == session.id,
                     onPlay = {
+                        actionError = null
                         player?.release()
                         if (playingId == session.id) {
                             player = null
                             playingId = null
                         } else {
-                            val created = MediaPlayer().apply {
-                                setDataSource(session.wav.absolutePath)
-                                setOnCompletionListener {
-                                    playingId = null
-                                    release()
-                                    player = null
+                            try {
+                                val created = MediaPlayer().apply {
+                                    setDataSource(session.wav.absolutePath)
+                                    setOnCompletionListener {
+                                        playingId = null
+                                        release()
+                                        player = null
+                                    }
+                                    prepare()
+                                    start()
                                 }
-                                prepare()
-                                start()
+                                player = created
+                                playingId = session.id
+                            } catch (error: Exception) {
+                                player = null
+                                playingId = null
+                                actionError = "Couldn't play this recording."
                             }
-                            player = created
-                            playingId = session.id
                         }
                     },
                     onShare = {
-                        val authority = "${context.packageName}.fileprovider"
-                        val streams = arrayListOf(
-                            FileProvider.getUriForFile(context, authority, session.wav),
-                        )
-                        if (session.transcript.isFile) {
-                            streams += FileProvider.getUriForFile(context, authority, session.transcript)
+                        actionError = null
+                        try {
+                            val authority = "${context.packageName}.fileprovider"
+                            val streams = arrayListOf(
+                                FileProvider.getUriForFile(context, authority, session.wav),
+                            )
+                            if (session.transcript.isFile) {
+                                streams += FileProvider.getUriForFile(context, authority, session.transcript)
+                            }
+                            val share = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                                type = "*/*"
+                                putParcelableArrayListExtra(Intent.EXTRA_STREAM, streams)
+                                putExtra(Intent.EXTRA_SUBJECT, "Glasses recording ${session.id}")
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                val clip = ClipData.newUri(context.contentResolver, "recording", streams.first())
+                                streams.drop(1).forEach { clip.addItem(ClipData.Item(it)) }
+                                clipData = clip
+                            }
+                            context.startActivity(
+                                Intent.createChooser(share, "Share recording").addFlags(
+                                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                                ),
+                            )
+                        } catch (_: ActivityNotFoundException) {
+                            actionError = "Nothing on this phone can share the recording."
+                        } catch (_: IllegalArgumentException) {
+                            actionError = "Couldn't share this recording."
                         }
-                        val share = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
-                            type = "*/*"
-                            putParcelableArrayListExtra(Intent.EXTRA_STREAM, streams)
-                            putExtra(Intent.EXTRA_SUBJECT, "Glasses recording ${session.id}")
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        }
-                        context.startActivity(Intent.createChooser(share, "Share recording"))
                     },
                     onDelete = { pendingDelete = session },
                 )
@@ -138,6 +172,7 @@ fun SessionsScreen(viewModel: MainViewModel, modifier: Modifier = Modifier) {
 @Composable
 private fun SessionRow(
     session: SessionSummary,
+    transcript: String,
     playing: Boolean,
     onPlay: () -> Unit,
     onShare: () -> Unit,
@@ -149,8 +184,13 @@ private fun SessionRow(
             Text(session.inputLabel.ifBlank { session.source })
             Text(
                 "${formatDuration(session.durationMs)} · ${session.modelTitle}" +
-                    (session.rtf?.let { " · RTF ${"%.2f".format(it)}" } ?: ""),
+                    (session.rtf?.let { " · RTF ${"%.2f".format(it)}" } ?: "") +
+                    if (playing) "\nPlaying" else "",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                transcript.ifBlank { "No speech recognized." },
+                style = MaterialTheme.typography.bodyMedium,
             )
             Row {
                 IconButton(onClick = onPlay) {

@@ -55,5 +55,10 @@ object AudioRouteSelector {
         }
     }
 
-    fun phoneLabel(): String = "Phone microphone"
+    fun phoneLabel(): String = phoneFallbackLabel(headsetConnected = true)
+
+    /** Phone mic label. Names the no-glasses fallback when no headset is connected. */
+    fun phoneFallbackLabel(headsetConnected: Boolean): String {
+        return if (headsetConnected) "Phone microphone" else "Phone microphone · no glasses"
+    }
 }

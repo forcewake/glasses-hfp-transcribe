@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import com.glasses.hfptranscribe.DebugWav
 import com.glasses.hfptranscribe.GlassesApp
 import com.glasses.hfptranscribe.MainActivity
 import com.glasses.hfptranscribe.R
@@ -33,9 +34,12 @@ class RecordingService : Service() {
         val runtime = (application as GlassesApp).graph.runtime
         startAsForeground(runtime.state.value.statusText.ifBlank { "Preparing microphone" })
         acquireWakeLock()
+        val app = application as GlassesApp
         when (intent?.action) {
             ACTION_STOP -> runtime.stop()
-            else -> runtime.start(::updateNotification)
+            else -> if (!DebugWav.startFromService(app, intent, ::updateNotification)) {
+                runtime.start(::updateNotification)
+            }
         }
         observe()
         return START_NOT_STICKY

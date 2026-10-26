@@ -25,6 +25,10 @@ jobs:
           java-version: 17
 
       - uses: android-actions/setup-android@v3
+        with:
+          # The action's default package list still includes the removed "tools"
+          # package, which makes current sdkmanager exit 1.
+          packages: platform-tools
 
       - name: Install Android SDK 37
         run: |

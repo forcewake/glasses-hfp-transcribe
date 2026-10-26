@@ -1,0 +1,78 @@
+name: Android
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 37
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "platforms;android-37.0" "build-tools;36.0.0" \
+            || sdkmanager --install "platforms;android-37" "build-tools;36.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests
+        run: ./gradlew test --stacktrace
+
+      - name: Assemble debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Rename APK
+        id: apk
+        run: |
+          version=$(grep '^appVersionName=' gradle.properties | cut -d= -f2)
+          name="glasses-transcript-${version}-debug.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "$name"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: glasses-transcript-debug
+          path: ${{ steps.apk.outputs.name }}
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${{ steps.apk.outputs.version }}"
+          tag="v${version}"
+          apk="${{ steps.apk.outputs.name }}"
+          notes=$(cat <<EOF
+          Debug build of Glasses Transcript ${version}.
+
+          Install this APK on the phone that is paired with the Ray-Ban Display glasses. The first recording downloads a speech model from the sherpa-onnx release (about 23 MB for the default Russian model). The APK is signed with the debug key checked into the repository, so later builds of the same version can be installed over this one.
+
+          This package does not include model weights. Audio and transcripts stay on the phone.
+          EOF
+          )
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$apk" --clobber
+          else
+            gh release create "$tag" "$apk" --title "$tag" --notes "$notes"
+          fi

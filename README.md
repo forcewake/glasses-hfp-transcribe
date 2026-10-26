@@ -12,7 +12,7 @@ The glasses already behave as a normal Bluetooth headset once they are paired in
 ## Install
 
 1. Pair the glasses with the phone in the Meta AI app. Developer Mode is not required for this HFP path.
-2. On the phone, open the [GitHub release](../../releases) and download `glasses-transcript-0.1.0-debug.apk`.
+2. On the phone, open the [GitHub release](../../releases) and download `glasses-transcript-0.1.1-debug.apk`.
 3. Allow installation from the browser or Files, then install. The APK is signed with the debug key in this repository (`app/debug.keystore`, store password `android`). Later builds of the same version install over the previous one.
 4. Open **Glasses Transcript** and allow the microphone, nearby Bluetooth devices, and notifications.
 
@@ -34,7 +34,7 @@ Recording runs in a foreground service with type `microphone`, a partial wake lo
 - **Glasses** is the default input. The status line names the headset that will be used, for example `Glasses microphone · Ray-Ban Meta`.
 - If several Bluetooth headsets are connected, Settings → **Glasses name** picks the product name that contains that text (default `Ray-Ban`). Otherwise the app prefers a name containing Ray-Ban, RayBan, or Meta, then the first SCO device.
 - The app sets `AudioManager.mode` to `MODE_IN_COMMUNICATION`, calls `setCommunicationDevice` with the `TYPE_BLUETOOTH_SCO` device, waits until that device is the active communication device, and only then starts `AudioRecord`.
-- **Phone microphone** is the other side of the same switch. It is labeled **Phone microphone**, uses the built-in mic and `VOICE_RECOGNITION`, and does not take the communication route.
+- **Phone microphone** is the other side of the same switch. It is labeled **Phone microphone**, or **Phone microphone · no glasses** when no headset is connected. It uses the built-in mic and `VOICE_RECOGNITION`, and does not take the communication route.
 - A level meter shows the live input. Partial text is italic; finished phrases are saved.
 - Sessions (WAV + timestamped `.txt`) are listed under **Sessions**. You can play, share, or delete them. Files live in the app’s private storage.
 
@@ -130,6 +130,17 @@ export ANDROID_HOME="$HOME/android-sdk"   # or your SDK
 ./gradlew assembleDebug
 ```
 
-The first build downloads `sherpa-onnx-2.0.0.aar` from the sherpa-onnx GitHub release. Unit tests cover SCO device selection, the WAV writer, and transcript formatting. They do not load the native library.
+The first build downloads `sherpa-onnx-2.0.0.aar` from the sherpa-onnx GitHub release. Unit tests cover SCO device selection, the WAV writer, WAV reading, and transcript formatting. They do not load the native library.
 
-GitHub Actions, on every push to `main`, runs those tests, builds the debug APK, and attaches it to the `v0.1.0` release (the version in `gradle.properties`). Pull requests run the same tests and build without publishing.
+Debug builds can feed a WAV through the same recognizer without a button on screen. The activity has to be in the foreground, and the path has to be readable by the app:
+
+```bash
+adb shell am start -n com.glasses.hfptranscribe/.MainActivity \
+  -a com.glasses.hfptranscribe.action.DEBUG_TRANSCRIBE_WAV \
+  --es wav /data/user/0/com.glasses.hfptranscribe/files/inbox/clip.wav \
+  --es model ru-small-int8
+```
+
+Release builds ignore that intent.
+
+GitHub Actions, on every push to `main`, runs those tests, builds the debug APK, and attaches it to a GitHub Release tagged from `appVersionName` in `gradle.properties` (currently `v0.1.1`). Pull requests run the same tests and build without publishing.

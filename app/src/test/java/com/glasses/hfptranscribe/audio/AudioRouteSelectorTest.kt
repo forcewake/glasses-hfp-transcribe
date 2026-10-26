@@ -86,6 +86,11 @@ class AudioRouteSelectorTest {
     @Test
     fun labelsStayExplicit() {
         assertEquals("Phone microphone", AudioRouteSelector.phoneLabel())
+        assertEquals("Phone microphone", AudioRouteSelector.phoneFallbackLabel(headsetConnected = true))
+        assertEquals(
+            "Phone microphone · no glasses",
+            AudioRouteSelector.phoneFallbackLabel(headsetConnected = false),
+        )
         assertEquals(
             "Glasses microphone · Ray-Ban Meta",
             AudioRouteSelector.glassesLabel("Ray-Ban Meta"),

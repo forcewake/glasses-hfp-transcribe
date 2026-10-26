@@ -12,6 +12,7 @@ import com.glasses.hfptranscribe.service.RecordingService
 import com.glasses.hfptranscribe.session.SessionSummary
 import com.glasses.hfptranscribe.stt.AppLanguage
 import com.glasses.hfptranscribe.stt.AsrModel
+import com.glasses.hfptranscribe.stt.Models
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -33,6 +34,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         refresh()
+        viewModelScope.launch {
+            var previous = graph.runtime.state.value.phase
+            graph.runtime.state.collect { state ->
+                val phase = state.phase
+                if (phase != previous && (phase == RecordPhase.IDLE || phase == RecordPhase.ERROR)) {
+                    sessions.value = graph.sessions.list()
+                    readyModels.value = Models.all.filter { graph.models.isReady(it) }.map { it.id }.toSet()
+                }
+                previous = phase
+            }
+        }
     }
 
     fun refresh() {
@@ -46,6 +58,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun microphoneGranted(): Boolean = granted(Manifest.permission.RECORD_AUDIO)
+
+    fun needsPermissions(): Boolean = requiredPermissions().any { !granted(it) }
 
     fun requiredPermissions(): Array<String> = buildList {
         add(Manifest.permission.RECORD_AUDIO)

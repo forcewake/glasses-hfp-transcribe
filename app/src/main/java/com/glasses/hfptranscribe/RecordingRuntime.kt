@@ -8,6 +8,8 @@ import android.os.SystemClock
 import android.util.Log
 import com.glasses.hfptranscribe.audio.AudioRouteController
 import com.glasses.hfptranscribe.audio.AudioRouteSelector
+import com.glasses.hfptranscribe.audio.OpenedGlasses
+import com.glasses.hfptranscribe.audio.RouteException
 import com.glasses.hfptranscribe.audio.CaptureSource
 import com.glasses.hfptranscribe.audio.DeviceScan
 import com.glasses.hfptranscribe.audio.InputKind
@@ -36,7 +38,6 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.min
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.coroutineContext
 import kotlin.math.max
 
@@ -60,6 +61,7 @@ data class RecorderState(
     val modelLabel: String = "",
     val rtf: Double? = null,
     val error: String? = null,
+    val diagnostics: String? = null,
 )
 
 class RecordingRuntime(
@@ -96,15 +98,18 @@ class RecordingRuntime(
                 record(onStatus)
             } catch (error: Throwable) {
                 if (coroutineContext.isActive) {
+                    val route = error as? RouteException
+                    val summary = route?.summary ?: error.message ?: "Recording failed"
                     _state.update {
                         it.copy(
                             phase = RecordPhase.ERROR,
-                            error = error.message ?: "Recording failed",
-                            statusText = error.message ?: "Recording failed",
+                            error = summary,
+                            diagnostics = route?.diagnostics,
+                            statusText = summary,
                             level = 0f,
                         )
                     }
-                    onStatus(error.message ?: "Recording failed")
+                    onStatus(summary)
                 }
             } finally {
                 routes.release()
@@ -139,6 +144,7 @@ class RecordingRuntime(
                         it.copy(
                             phase = RecordPhase.ERROR,
                             error = message,
+                            diagnostics = null,
                             statusText = message,
                             level = 0f,
                         )
@@ -172,7 +178,7 @@ class RecordingRuntime(
             models.ensure(model)
         }
 
-        val routed = openRoute(source, selected, settings.glassesName)
+        val routed = openRoute(source, selected)
         val label = routed.label
         _state.update {
             it.copy(
@@ -219,11 +225,8 @@ class RecordingRuntime(
             }
             onStatus("Recording · $label")
             val routeLost = AtomicBoolean(false)
-            val expectedId = AtomicInteger(routed.deviceId)
             if (source == CaptureSource.GLASSES) {
-                routes.watch { id ->
-                    if (id != expectedId.get()) routeLost.set(true)
-                }
+                routes.watchRoute(routed.sinkId, routed.legacySco) { routeLost.set(true) }
             }
             var smoothed = 0f
             var samples = 0L
@@ -240,21 +243,21 @@ class RecordingRuntime(
                     }
                     mic.close()
                     activeRecord = null
-                    val again = reconnectGlasses(settings.glassesName, expectedId, routeLost)
+                    val again = reconnectGlasses(settings.glassesName)
                     if (again == null) {
                         failure = "Bluetooth route lost. Saved what was recorded."
                         break
                     }
-                    mic = openCapture(source, routes.device(again))
+                    routeLost.set(false)
+                    routes.watchRoute(again.sinkId, again.legacySco) { routeLost.set(true) }
+                    mic = openCapture(source, again.input)
                     capture = mic
                     if (mic.sampleRate != rate) {
                         mic.close()
                         failure = "The headset sample rate changed. Saved what was recorded."
                         break
                     }
-                    val refreshed = AudioRouteSelector.glassesLabel(
-                        _scan.value.candidates.firstOrNull { it.id == again }?.productName.orEmpty(),
-                    )
+                    val refreshed = AudioRouteSelector.glassesLabel(again.productName)
                     _state.update { it.copy(inputLabel = refreshed, statusText = "Recording") }
                     onStatus("Recording · $refreshed")
                 }
@@ -497,7 +500,6 @@ class RecordingRuntime(
     private suspend fun openRoute(
         source: CaptureSource,
         deviceId: Int,
-        glassesName: String,
     ): Routed {
         return when (source) {
             CaptureSource.PHONE -> {
@@ -512,54 +514,28 @@ class RecordingRuntime(
                 )
             }
             CaptureSource.GLASSES -> {
-                val device = routes.device(deviceId)
-                    ?: error("The glasses disappeared before recording could start.")
-                if (!routes.applyGlasses(device)) {
-                    error("Android refused the Bluetooth headset route.")
-                }
-                if (!awaitRoute(deviceId)) {
-                    error(
-                        "The Bluetooth route did not settle. Wake the glasses, " +
-                            "keep them near the phone, and try again.",
-                    )
-                }
+                val opened = routes.openGlasses(deviceId)
                 refreshDevices()
-                val name = _scan.value.candidates.firstOrNull { it.id == deviceId }?.productName
-                    ?: device.productName?.toString().orEmpty()
-                val matched = AudioRouteSelector.selectGlasses(_scan.value.candidates, glassesName)
-                val label = AudioRouteSelector.glassesLabel(matched?.productName ?: name)
-                Routed(deviceId = deviceId, device = routes.device(deviceId) ?: device, label = label)
+                Routed(
+                    deviceId = opened.input?.id ?: deviceId,
+                    device = opened.input,
+                    label = AudioRouteSelector.glassesLabel(opened.productName),
+                    sinkId = opened.sinkId,
+                    legacySco = opened.legacySco,
+                )
             }
         }
     }
 
-    private suspend fun reconnectGlasses(
-        glassesName: String,
-        expectedId: AtomicInteger,
-        routeLost: AtomicBoolean,
-    ): Int? {
+    private suspend fun reconnectGlasses(glassesName: String): OpenedGlasses? {
         refreshDevices()
         val candidate = AudioRouteSelector.selectGlasses(_scan.value.candidates, glassesName)
             ?: return null
-        val device = routes.device(candidate.id) ?: return null
-        expectedId.set(candidate.id)
-        routeLost.set(false)
-        if (!routes.applyGlasses(device)) return null
-        if (!awaitRoute(candidate.id)) return null
-        routeLost.set(false)
-        return candidate.id
-    }
-
-    private suspend fun awaitRoute(deviceId: Int, timeoutMs: Long = 2_500L): Boolean {
-        val deadline = SystemClock.elapsedRealtime() + timeoutMs
-        while (SystemClock.elapsedRealtime() < deadline) {
-            if (routes.communicationDeviceId() == deviceId) {
-                delay(400)
-                return routes.communicationDeviceId() == deviceId
-            }
-            delay(100)
+        return try {
+            routes.openGlasses(candidate.id)
+        } catch (_: RouteException) {
+            null
         }
-        return false
     }
 
     private fun openCapture(
@@ -658,6 +634,8 @@ class RecordingRuntime(
         val deviceId: Int,
         val device: AudioDeviceInfo?,
         val label: String,
+        val sinkId: Int? = null,
+        val legacySco: Boolean = false,
     )
 }
 

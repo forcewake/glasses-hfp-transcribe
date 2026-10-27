@@ -12,7 +12,7 @@ The glasses already behave as a normal Bluetooth headset once they are paired in
 ## Install
 
 1. Pair the glasses with the phone in the Meta AI app. Developer Mode is not required for this HFP path.
-2. On the phone, open the [GitHub release](../../releases) and download `glasses-transcript-0.1.1-debug.apk`.
+2. On the phone, open the [GitHub release](../../releases) and download `glasses-transcript-0.1.2-debug.apk`.
 3. Allow installation from the browser or Files, then install. The APK is signed with the debug key in this repository (`app/debug.keystore`, store password `android`). Later builds of the same version install over the previous one.
 4. Open **Glasses Transcript** and allow the microphone, nearby Bluetooth devices, and notifications.
 
@@ -33,7 +33,7 @@ Recording runs in a foreground service with type `microphone`, a partial wake lo
 
 - **Glasses** is the default input. The status line names the headset that will be used, for example `Glasses microphone · Ray-Ban Meta`.
 - If several Bluetooth headsets are connected, Settings → **Glasses name** picks the product name that contains that text (default `Ray-Ban`). Otherwise the app prefers a name containing Ray-Ban, RayBan, or Meta, then the first SCO device.
-- The app sets `AudioManager.mode` to `MODE_IN_COMMUNICATION`, calls `setCommunicationDevice` with the `TYPE_BLUETOOTH_SCO` device, waits until that device is the active communication device, and only then starts `AudioRecord`.
+- The app sets `AudioManager.mode` to `MODE_IN_COMMUNICATION` and calls `setCommunicationDevice` with the `TYPE_BLUETOOTH_SCO` device from `availableCommunicationDevices` (the speaker side of the headset). The glasses microphone is a separate input and is only passed to `AudioRecord`. If the phone rejects that request, the app falls back to `startBluetoothSco` and waits until SCO is connected. A failure shows what was tried and a **Copy diagnostics** action.
 - **Phone microphone** is the other side of the same switch. It is labeled **Phone microphone**, or **Phone microphone · no glasses** when no headset is connected. It uses the built-in mic and `VOICE_RECOGNITION`, and does not take the communication route.
 - A level meter shows the live input. Partial text is italic; finished phrases are saved.
 - Sessions (WAV + timestamped `.txt`) are listed under **Sessions**. You can play, share, or delete them. Files live in the app’s private storage.
@@ -49,7 +49,7 @@ The timestamp is when the phrase was committed, on the recording clock.
 
 ## How HFP routing works, and its limits
 
-Meta’s microphone guide for Android is the routing this app uses: choose `AudioDeviceInfo.TYPE_BLUETOOTH_SCO` from `AudioManager.availableCommunicationDevices`, set `MODE_IN_COMMUNICATION`, then `setCommunicationDevice`. After the route has settled, a normal capture reads the glasses.
+Meta’s microphone guide for Android is the routing this app uses: choose `AudioDeviceInfo.TYPE_BLUETOOTH_SCO` from `AudioManager.availableCommunicationDevices` (a sink), set `MODE_IN_COMMUNICATION`, then `setCommunicationDevice`. The platform picks the matching microphone. This app also passes that input to `AudioRecord` when it can see one. Phones that reject `setCommunicationDevice` get a `startBluetoothSco` fallback. After the route has settled, capture reads the glasses.
 
 [Device audio overview](https://wearables.developer.meta.com/docs/develop/dat/microphones-and-speakers):
 
@@ -143,4 +143,4 @@ adb shell am start -n com.glasses.hfptranscribe/.MainActivity \
 
 Release builds ignore that intent.
 
-GitHub Actions, on every push to `main`, runs those tests, builds the debug APK, and attaches it to a GitHub Release tagged from `appVersionName` in `gradle.properties` (currently `v0.1.1`). Pull requests run the same tests and build without publishing.
+GitHub Actions, on every push to `main`, runs those tests, builds the debug APK, and attaches it to a GitHub Release tagged from `appVersionName` in `gradle.properties` (currently `v0.1.2`). Pull requests run the same tests and build without publishing.
